@@ -39,8 +39,6 @@ const watchdog     = require('./lib/watchdog.js');
 const verifyLib    = require('./lib/verify.js');
 const installLib   = require('./lib/install.js');
 const timeoutLib   = require('./lib/timeout.js');
-const snapshotA11y = require('./lib/snapshot-a11y.js');
-
 // Path to the legacy xb.cjs
 const XB_CJS_PATH = join(__dirname, 'xb.cjs');
 const NODE_BIN = process.env.QCLAW_CLI_NODE_BINARY || 'node';
@@ -105,22 +103,25 @@ function delegateToV1(args) {
  *
  * @param {string[]} subArgs — args after 'run'
  * @param {string|null} mode — from --mode flag
- * @returns {{ args: string[], error?: string, hint?: string }}
+ * @returns {{ args: string[], a11yMode: string|null, tempDir: string|null, error?: string, hint?: string }}
  */
 function resolveRunArgs(subArgs, mode) {
-  let args = [...subArgs];
-
   // --- 1. Mode resolution ---
-  if (mode) {
-    const { modifiedArgs, invalidMode } = modeLib.resolveMode(
-      { browser: { mode: 'persistent' } },
-      args
-    );
-    if (invalidMode) {
-      return { args: [], error: `Invalid --mode value: "${mode}"`, hint: 'Valid modes: persistent, isolated' };
-    }
-    args = modifiedArgs;
+  // Re-inject --mode flag so modeLib can detect it.
+  // xb-v2.mjs strips --mode from rawArgs at dispatch time;
+  // modeLib.resolveMode scans args for the flag, so we must put it back.
+  let args = mode ? ['--mode', mode, ...subArgs] : [...subArgs];
+
+  const { modifiedArgs, invalidMode, tempDir } = modeLib.resolveMode(
+    { browser: { mode: 'persistent' } },
+    args
+  );
+
+  if (invalidMode) {
+    return { args: [], error: `Invalid --mode value: "${mode}"`, hint: 'Valid modes: persistent, isolated' };
   }
+
+  args = modifiedArgs;
 
   // --- 2. Timeout resolution ---
   // Extract existing --timeout from args (for --timeout injection if needed)
@@ -149,7 +150,7 @@ function resolveRunArgs(subArgs, mode) {
     args.unshift('--timeout', String(effectiveTimeout));
   }
 
-  return { args };
+  return { args, a11yMode, tempDir: tempDir || null };
 }
 
 /**
@@ -158,7 +159,8 @@ function resolveRunArgs(subArgs, mode) {
  */
 function detectA11yMode(args) {
   const verb = args.length > 0 ? String(args[0]).toLowerCase() : '';
-  if (!snapshotA11y.FULL_SNAPSHOT_VERBS.has(verb)) return null;
+  // Only 'snapshot' verb supports a11y formatting. screenshot/pdf do not.
+  if (verb !== 'snapshot') return null;
 
   // Check for --a11y flag
   if (args.includes('--a11y')) return 'a11y';
@@ -245,6 +247,15 @@ async function main() {
       output(fail('run', runResolved.error, runResolved.hint));
       process.exitCode = 1;
       return;
+    }
+
+    // Register tempDir cleanup for isolated sessions
+    if (runResolved.tempDir) {
+      const temp = runResolved.tempDir;
+      process.on('exit', () => {
+        try { fs.rmSync(temp, { recursive: true, force: true }); } catch {}
+      });
+      process.stderr.write(`[xb-v2] isolated session, temp profile: ${temp}\n`);
     }
 
     finalArgs = ['run', ...runResolved.args];

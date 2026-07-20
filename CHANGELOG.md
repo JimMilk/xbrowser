@@ -1,6 +1,17 @@
 # Changelog
 
-## [Unreleased] - 阶段一至阶段三
+## [2.0.1] - 2026-07-20
+
+### Bug 修复
+- 修复 `--mode isolated` 被 xb-v2.mjs 静默丢弃（回退为 persistent）
+- `detectA11yMode` 限制为 `snapshot` 专用（screenshot/pdf 不需要 a11y 标记）
+- `resolveRunArgs` 返回值增加 `a11yMode` 和 `tempDir`
+- `tempDir` 退出时自动清理（`process.on('exit')`）
+- 移除未使用的 `snapshotA11y` 模块导入
+- 新增 5 个测试文件：config-v2(48) + mode(25) + verify(22) + integration(25)
+- 测试总计：203，全部通过
+
+## [2.0.0] - 2026-07-20
 
 ### 阶段一：架构加固
 - Config JSON 分层 merge（默认值 → 文件 → 环境变量 → CLI）
