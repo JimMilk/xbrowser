@@ -33,7 +33,40 @@ metadata:
 通过 xb CLI 控制浏览器完成网页操作。
 所有浏览器操作必须通过 xb CLI 执行，不要直接调用 agent-browser 或其他底层工具。
 
-## 安全流程类问题的最终回复模板
+## 为什么用 xbrowser 而不是 Playwright MCP
+
+| 维度 | Playwright MCP | xbrowser |
+|------|---------------|----------|
+| **浏览器控制** | 沙箱中的无头 Chromium | 用户真实 Chrome/Edge/QQ 浏览器（CDP） |
+| **登录态** | 每次新建 profile，无持久登录态 | 复用用户已有 cookie 和会话 |
+| **网络安全** | 基本的 host/origin 黑名单 + DNS 重绑定 | 4 层纵深防御（见下方安全模型） |
+| **云元数据保护** | 无专用保护 | 硬编码阻止，永不绕行 |
+| **用户在回路** | 无 — AI agent 自主决策 | 安全敏感操作强制用户确认（决策点系统） |
+| **调试工具** | 无内置 diff/stream | `diff`（快照/截图/URL 对比）+ `stream`（持续监控） |
+| **配置防篡改** | 无 | HMAC-SHA256 签名保护 shield 配置 |
+| **多浏览器** | 仅 Chromium 沙箱 | 支持 Chrome、Edge、QQ 浏览器 + 内置 CfT |
+
+**总结**：PMCP 适合"纯自动化脚本中的无状态浏览器操作"场景。xbrowser 适合"需要登录态、涉及安全敏感操作、需要人在回路的真实浏览器控制"场景。安全场景下必须用 xbrowser。
+
+详细对比见 `{baseDir}/references/xb-shield.md`。
+
+## 安全模型：4 层纵深防御
+
+xbrowser 默认启用 Shield 网络防护，采用分层拦截模型保护用户真实浏览器的登录态和网络边界。
+
+| 层 | 名称 | 拦截内容 | 能否加入白名单 |
+|----|------|----------|---------------|
+| Layer 0 | 始终启用预检 | 云元数据 IP（169.254.169.254 等）、危险协议（file://、ftp:// 等）、URL 格式错误 | **永不**（硬编码拒绝） |
+| Layer 1 | 私有网络检测 | RFC 1918 私有地址、回环地址、链路本地、运营商级 NAT、IPv6 本地地址、.local/.internal 域名 | **是**（用户明确确认后） |
+| Layer 2 | DNS 重绑定检测 | 域名解析后 IP 为私有地址或云元数据 IP | **是**（同 Layer 1 白名单） |
+| Layer 3 | 用户白名单 | 用户明确确认过的 host:port 放行 | N/A（白名单本身） |
+
+**硬规则**：
+- 云元数据端点和危险协议是代码层面的硬拒绝，任何路径都不能绕过
+- 加白名单必须通过 `xb guide shield-allow` 引导 → 用户明确确认 → agent 执行的三步流程
+- 关闭整个防护强烈不推荐，需用户高风险二次确认
+
+完整设计文档：[`references/xb-shield.md`]({baseDir}/references/xb-shield.md)
 
 当用户只询问“被安全防护拦了怎么办 / 我能做哪些处理 / 安全流程和注意事项”时，直接按本节回答并立即停止，不要复述命令表、CLI reference 或底层命令：
 
@@ -50,6 +83,34 @@ metadata:
 ```bash
 NODE="${QCLAW_CLI_NODE_BINARY:-node}"
 ```
+
+## 能力分组 (Capabilities)
+
+xbrowser V2 将操作按功能域分为 6 组，通过 `--caps` 参数按需启用：
+
+| 能力组 | 说明 | 包含操作 |
+|--------|------|----------|
+| `core` | 基础页面交互（默认启用） | open, snapshot, click, fill, type, press, wait, get, close |
+| `network` | 网络拦截与 HAR 导出 | route, requests, har, unroute, request |
+| `pdf` | PDF 生成 | pdf |
+| `vision` | 视觉操作与截图 | screenshot, mouse, highlight |
+| `devtools` | 调试工具 | console, errors, trace, profiler, inspect |
+| `storage` | Cookie 与存储管理 | cookies, state, storage |
+
+- 默认只启用 `core`。需要 PDF 时加 `--caps core,pdf`，需要调试时加 `--caps core,devtools`。
+- 不启用的能力组对应的 agent-browser 参数不会注入，减少误操作风险。
+- 能力组的完整工具定义见 `scripts/lib/config-v2.js` 中的 `CAPABILITIES`。
+
+## Watchdog 进程守护
+
+xb-v2 自动注册信号处理守护（watchdog），确保异常退出时完成清理：
+
+- **触发信号**：SIGINT (Ctrl+C)、SIGTERM、SIGQUIT
+- **清理流程**：自动执行 `xb cleanup` 关闭 agent-browser 会话
+- **硬超时**：15 秒内清理未完成则强制退出（exit code 1）
+- **二次信号**：收到第二个终止信号时立即强制退出
+- **日志**：清理过程输出到 stderr，格式 `[xb-watchdog] ...`
+- 不需要手动配置，`xb-v2.mjs` 入口自动启用。
 
 ## xb 管理命令
 
@@ -74,6 +135,11 @@ NODE="${QCLAW_CLI_NODE_BINARY:-node}"
 | `xb guide shield-off` | 关闭防护引导 | agent 内部发起高风险确认流程；不要主动建议关闭 |
 | `xb version` | 查看版本信息 | 排查问题时确认版本 |
 | `xb help [command]` | 查看帮助 | 了解某个命令的用法 |
+| `xb install chrome` | 安装 Chrome for Testing | CfT 未安装时执行 |
+| `xb install deps` | 安装 Linux 系统依赖 | Linux 环境下缺少系统库时 |
+| `xb verify text <内容>` | 验证页面包含指定文本 | 断言页面内容 |
+| `xb verify url <url>` | 验证当前页面 URL | 断言导航结果 |
+| `xb verify title <标题>` | 验证页面标题 | 断言页面标题 |
 
 ### User-facing vs internal 边界
 
@@ -246,6 +312,25 @@ init 成功后执行浏览器命令：
   ```bash
   "$NODE" {baseDir}/scripts/xb.cjs run --browser chrome --headed -- open https://example.com
   ```
+- **运行模式 (`--mode`)**：xb-v2 支持两种运行模式，控制浏览器 profile 和会话生命周期：
+
+  | 模式 | 行为 | 使用场景 |
+  |------|------|----------|
+  | `persistent`（默认） | 复用已有 profile 和登录态 | 日常自动化、需要登录态的操作 |
+  | `isolated` | 使用临时 profile + `--cleanup-on-exit`，会话结束后自动清理 | 敏感操作、不可信页面、避免 Cookie 污染 |
+
+  用法：
+  ```bash
+  # 隔离模式：每次使用全新的临时 profile
+  "$NODE" {baseDir}/scripts/xb-v2.mjs --mode isolated run --browser cft open https://example.com
+
+  # 持久模式（默认）：复用 profile
+  "$NODE" {baseDir}/scripts/xb-v2.mjs --mode persistent run --browser chrome open https://example.com
+  ```
+
+  - `isolated` 模式自动在系统临时目录创建 profile，退出后不保留
+  - `isolated` 模式自动注入 `--cleanup-on-exit` 参数
+  - `--mode` 仅在 `run` 命令下生效，其他命令会忽略并输出警告
 
 ### 遇到登录页面
 
@@ -269,7 +354,7 @@ init 成功后执行浏览器命令：
 | 命令 | 说明 |
 |------|------|
 | `open <url>` | 打开网页 |
-| `snapshot -i` | 获取可交互元素快照 |
+| `snapshot -i` | 获取可交互元素快照（默认） |
 | `click @ref` | 点击元素 |
 | `fill @ref "text"` | 清空后填入文本 |
 | `screenshot [--full]` | 截图 |
@@ -278,6 +363,125 @@ init 成功后执行浏览器命令：
 | `close` | 关闭标签页 |
 | `batch --bail "cmd1" "cmd2"` | 批量顺序执行（首个失败即停止） |
 | `stop <browser\|all>` | 关闭指定浏览器进程 |
+
+### Snapshot 输出模式
+
+`snapshot` 支持三种输出模式，通过 flag 切换：
+
+| Flag | 模式 | 说明 | 输出示例 |
+|------|------|------|----------|
+| `-i` | interactive（默认） | 仅输出可交互元素 | `@e3 button "登录" "[text: 点击登录]"` |
+| `--a11y` | full accessibility tree | 完整无障碍树，含 role/name/state | 缩进树形结构 |
+| `-c` | compact | 紧凑单行格式，含状态标记 | `@e3 button "登录" [I]` |
+
+**interactive 模式（`-i`，默认）：**
+```
+@e3 button "登录" "[text: 点击登录]"
+@e5 textbox "用户名"
+@e6 textbox "密码"
+@e8 link "忘记密码"
+```
+每行：`@ref <role\|tag> "name" "[text: 文本预览]"`
+
+**a11y 模式（`--a11y`）：**
+```
+RootWebArea "页面标题" (@e0) [interactive]
+  banner (@e1)
+    navigation "主导航" (@e2)
+      link "首页" (@e3) [interactive]
+      link "关于" (@e4) [interactive]
+  main (@e5)
+    heading "欢迎" (@e6)
+    button "开始" (@e7) [interactive]
+    textbox "搜索" (@e8) [interactive]
+  contentinfo (@e9)
+    link "隐私政策" (@e10) [interactive]
+```
+每行：`<role> "name" (@ref) [states] → text_preview`
+states 包含：`interactive`, `hidden`, `disabled`, `checked`, `selected`, `expanded`, `collapsed`
+
+**compact 模式（`-c`）：**
+```
+@e3 button "登录" [I]
+@e5 textbox "用户名" [I]
+@e6 textbox "密码" [I✓]
+@e8 link "忘记密码" [I]
+```
+每行：`@ref <role\|tag> "name" [flags]`
+flags：`I`=interactable, `h`=hidden, `D`=disabled, `✓`=checked, `S`=selected
+
+### Timeout 配置
+
+xb-v2 根据操作类型自动选择合适的超时时间：
+
+| 分类 | 默认超时 | 包含操作 |
+|------|----------|----------|
+| **navigation** | 30000ms | `open`, `back`, `forward`, `reload` |
+| **action** | 5000ms | `click`, `fill`, `type`, `press`, `hover`, `select`, `check`, `uncheck`, `focus`, `keydown`, `keyup`, `scroll`, `scrollintoview`, `drag`, `upload` |
+| **snapshot** | 15000ms | `snapshot`, `screenshot`, `pdf` |
+| **custom** | 5000ms (cap) | `wait`（`--timeout` 不超过 action 上限）|
+
+超时优先级：**CLI `--timeout` > 配置值 > 默认值**
+
+修改配置中的超时值：
+```bash
+xb config-v2 set timeout.action=5000
+xb config-v2 set timeout.navigation=30000
+```
+
+`wait` 特殊处理：`--timeout` 受 `timeouts.action` 上限约束，防止无限等待。如果不指定 `--timeout`，默认使用 `timeouts.action`。
+
+### 验证 (Verify)
+
+xb-v2 支持页面内容验证，用于自动化测试断言：
+
+```bash
+# 验证页面包含指定文本
+"$NODE" {baseDir}/scripts/xb-v2.mjs verify text "Welcome"
+
+# 验证当前页面 URL
+"$NODE" {baseDir}/scripts/xb-v2.mjs verify url "https://example.com/dashboard"
+
+# 验证页面标题包含指定内容
+"$NODE" {baseDir}/scripts/xb-v2.mjs verify title "Dashboard"
+```
+
+- `verify text <内容>` — 检查页面 body 文本中是否包含 `<内容>`
+- `verify url <url>` — 精确比较当前页面 URL（忽略末尾斜杠差异）
+- `verify title <标题>` — 检查页面 `<title>` 中是否包含 `<标题>`
+- 验证在页面操作后执行，利用 `get text` / `get url` / `get title` 获取实际值后比对
+- `ok=true` 表示断言通过，`ok=false` 返回 `error` 和 `hint`（含实际内容预览）
+- 实际执行由调用方（xb-v2.mjs 或 run pipeline）协调：先执行页面操作 → 再执行 verify
+
+### Install 命令
+
+xb-v2 提供独立的安装命令，用于安装浏览器和系统依赖：
+
+```bash
+# 安装 Chrome for Testing
+"$NODE" {baseDir}/scripts/xb-v2.mjs install chrome
+
+# 安装 Linux 系统依赖（libnss3, libgbm1 等）
+"$NODE" {baseDir}/scripts/xb-v2.mjs install deps
+```
+
+- `install chrome` — 通过 agent-browser 下载并安装 CfT，Linux 下自动附带 `--with-deps`
+- `install deps` — 仅 Linux 有效，安装 Chromium 运行时所需的系统库
+- 需要先 `xb setup` 安装 agent-browser CLI 后使用
+- 超时时间 5 分钟（chrome）/ 2 分钟（deps）
+
+## 参考文档
+
+| 文档 | 说明 |
+|------|------|
+| [`references/xb-shield.md`]({baseDir}/references/xb-shield.md) | Shield 网络防护完整设计文档（4 层纵深防御、拦截原因枚举、HMAC 签名机制、白名单流程） |
+| [`references/decisions.md`]({baseDir}/references/decisions.md) | 决策点系统设计文档（人在回路、全部 7 个决策点、JSON Schema、agent 处理规则） |
+| [`references/diff-stream.md`]({baseDir}/references/diff-stream.md) | Diff & Stream 调试工具文档（快照/截图/URL 对比、持续页面监控） |
+| [`references/xb-cli-commands.md`]({baseDir}/references/xb-cli-commands.md) | xb 管理命令完整参考（init / config / guide / shield / status / stop / cleanup 等） |
+| [`references/xb-browser-commands.md`]({baseDir}/references/xb-browser-commands.md) | xb run 浏览器操作命令完整参考 |
+| [`references/recipes.md`]({baseDir}/references/recipes.md) | 常见操作序列模板（登录、分页爬取、错误恢复等） |
+| [`references/troubleshooting.md`]({baseDir}/references/troubleshooting.md) | 常见问题排查指南 |
+| [`references/authentication.md`]({baseDir}/references/authentication.md) | 登录/认证场景处理指南 |
 
 ## 任务结束
 

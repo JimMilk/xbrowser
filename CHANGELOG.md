@@ -15,9 +15,12 @@
 - 超时配置化（action/navigation）
 
 ### 阶段三：差异化加固
-- Shield 保持不变
-- 决策点系统保留
-- Diff/Stream 保留
+- 扩展 `references/xb-shield.md` 为完整设计文档（4 层纵深防御、拦截原因枚举、HMAC 签名、白名单流程、PMCP 对比）
+- 新增 `references/decisions.md` 决策点系统设计文档（7 个决策点、JSON Schema、agent 处理规则）
+- 新增 `references/diff-stream.md` Diff & Stream 调试工具文档
+- SKILL.md 增加"为什么用 xbrowser vs Playwright MCP"对比章节
+- SKILL.md 增加"安全模型：4 层纵深防御"概览章节
+- SKILL.md 增加参考文档索引表
 
 ## [1.2.0] - 2025-06-11
 - Shield 安全防护模块（网络拦截、白名单、决策点确认）
