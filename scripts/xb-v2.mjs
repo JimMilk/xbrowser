@@ -33,11 +33,13 @@ const require = createRequire(import.meta.url);
 // --------------------------------------------------------------------------
 // Load V2 modules
 // --------------------------------------------------------------------------
-const configV2   = require('./lib/config-v2.js');
-const modeLib    = require('./lib/mode.js');
-const watchdog   = require('./lib/watchdog.js');
-const verifyLib  = require('./lib/verify.js');
-const installLib = require('./lib/install.js');
+const configV2     = require('./lib/config-v2.js');
+const modeLib      = require('./lib/mode.js');
+const watchdog     = require('./lib/watchdog.js');
+const verifyLib    = require('./lib/verify.js');
+const installLib   = require('./lib/install.js');
+const timeoutLib   = require('./lib/timeout.js');
+const snapshotA11y = require('./lib/snapshot-a11y.js');
 
 // Path to the legacy xb.cjs
 const XB_CJS_PATH = join(__dirname, 'xb.cjs');
@@ -90,6 +92,89 @@ function delegateToV1(args) {
     // If not JSON, just pass through raw text
     return { ok: true, command: 'xb', raw: stdout };
   }
+}
+
+// --------------------------------------------------------------------------
+// Run argument resolution (V2: mode + timeout + a11y)
+// --------------------------------------------------------------------------
+/**
+ * Resolve run args through V2 pipeline:
+ *   1. --mode → inject isolated/persistent args
+ *   2. --timeout → resolveTimeout for the action verb
+ *   3. snapshot --a11y / -i / -c → rewrite args for a11y formatting
+ *
+ * @param {string[]} subArgs — args after 'run'
+ * @param {string|null} mode — from --mode flag
+ * @returns {{ args: string[], error?: string, hint?: string }}
+ */
+function resolveRunArgs(subArgs, mode) {
+  let args = [...subArgs];
+
+  // --- 1. Mode resolution ---
+  if (mode) {
+    const { modifiedArgs, invalidMode } = modeLib.resolveMode(
+      { browser: { mode: 'persistent' } },
+      args
+    );
+    if (invalidMode) {
+      return { args: [], error: `Invalid --mode value: "${mode}"`, hint: 'Valid modes: persistent, isolated' };
+    }
+    args = modifiedArgs;
+  }
+
+  // --- 2. Timeout resolution ---
+  // Extract existing --timeout from args (for --timeout injection if needed)
+  const timeoutIdx = args.indexOf('--timeout');
+  let cliTimeout = null;
+  if (timeoutIdx >= 0 && timeoutIdx + 1 < args.length) {
+    cliTimeout = parseInt(args[timeoutIdx + 1], 10);
+    // Remove so we can re-inject computed timeout at the end
+    args.splice(timeoutIdx, 2);
+  }
+
+  // Determine the action verb (first non-flag arg)
+  const verb = args.length > 0 ? args[0] : null;
+
+  // --- 3. A11y snapshot flag detection ---
+  const a11yMode = detectA11yMode(args);
+  if (a11yMode) {
+    // Strip the a11y/snapshot flags we added, pass cleaned args to agent-browser
+    args = stripA11yFlags(args);
+  }
+
+  // --- Resolve timeout ---
+  if (verb) {
+    const effectiveTimeout = timeoutLib.resolveTimeout(verb, null, isNaN(cliTimeout) ? null : cliTimeout);
+    // Inject --timeout before the verb
+    args.unshift('--timeout', String(effectiveTimeout));
+  }
+
+  return { args };
+}
+
+/**
+ * Detect a11y mode flags from snapshot verb args.
+ * Returns 'interactive' | 'a11y' | 'compact' | null
+ */
+function detectA11yMode(args) {
+  const verb = args.length > 0 ? String(args[0]).toLowerCase() : '';
+  if (!snapshotA11y.FULL_SNAPSHOT_VERBS.has(verb)) return null;
+
+  // Check for --a11y flag
+  if (args.includes('--a11y')) return 'a11y';
+  // -c for compact
+  if (args.includes('-c')) return 'compact';
+  // -i for interactive (default)
+  if (args.includes('-i')) return 'interactive';
+
+  return null;
+}
+
+/**
+ * Strip a11y/formatting flags from args, leaving only agent-browser args.
+ */
+function stripA11yFlags(args) {
+  return args.filter(a => a !== '--a11y' && a !== '-c' && a !== '-i');
 }
 
 // --------------------------------------------------------------------------
@@ -152,19 +237,17 @@ async function main() {
   // --- V2 mode injection for 'run' command ---
   let finalArgs = [...argsAfterMode];
 
-  if (subcommand === 'run' && mode) {
-    const { modifiedArgs, invalidMode } = modeLib.resolveMode(
-      { browser: { mode: 'persistent' } },
-      subArgs
-    );
+  if (subcommand === 'run') {
+    // Resolve run args (mode, timeout, a11y flags)
+    const runResolved = resolveRunArgs(subArgs, mode);
 
-    if (invalidMode) {
-      output(fail('run', `Invalid --mode value: "${mode}"`, 'Valid modes: persistent, isolated'));
+    if (runResolved.error) {
+      output(fail('run', runResolved.error, runResolved.hint));
       process.exitCode = 1;
       return;
     }
 
-    finalArgs = ['run', ...modifiedArgs];
+    finalArgs = ['run', ...runResolved.args];
   } else if (mode && subcommand !== 'install' && subcommand !== 'verify' && subcommand !== 'config-v2') {
     // Warn about --mode on non-run commands
     process.stderr.write(`[xb-v2] --mode is only meaningful for 'run'. Ignoring.\n`);

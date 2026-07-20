@@ -321,7 +321,7 @@ init 成功后执行浏览器命令：
 | 命令 | 说明 |
 |------|------|
 | `open <url>` | 打开网页 |
-| `snapshot -i` | 获取可交互元素快照 |
+| `snapshot -i` | 获取可交互元素快照（默认） |
 | `click @ref` | 点击元素 |
 | `fill @ref "text"` | 清空后填入文本 |
 | `screenshot [--full]` | 截图 |
@@ -330,6 +330,73 @@ init 成功后执行浏览器命令：
 | `close` | 关闭标签页 |
 | `batch --bail "cmd1" "cmd2"` | 批量顺序执行（首个失败即停止） |
 | `stop <browser\|all>` | 关闭指定浏览器进程 |
+
+### Snapshot 输出模式
+
+`snapshot` 支持三种输出模式，通过 flag 切换：
+
+| Flag | 模式 | 说明 | 输出示例 |
+|------|------|------|----------|
+| `-i` | interactive（默认） | 仅输出可交互元素 | `@e3 button "登录" "[text: 点击登录]"` |
+| `--a11y` | full accessibility tree | 完整无障碍树，含 role/name/state | 缩进树形结构 |
+| `-c` | compact | 紧凑单行格式，含状态标记 | `@e3 button "登录" [I]` |
+
+**interactive 模式（`-i`，默认）：**
+```
+@e3 button "登录" "[text: 点击登录]"
+@e5 textbox "用户名"
+@e6 textbox "密码"
+@e8 link "忘记密码"
+```
+每行：`@ref <role\|tag> "name" "[text: 文本预览]"`
+
+**a11y 模式（`--a11y`）：**
+```
+RootWebArea "页面标题" (@e0) [interactive]
+  banner (@e1)
+    navigation "主导航" (@e2)
+      link "首页" (@e3) [interactive]
+      link "关于" (@e4) [interactive]
+  main (@e5)
+    heading "欢迎" (@e6)
+    button "开始" (@e7) [interactive]
+    textbox "搜索" (@e8) [interactive]
+  contentinfo (@e9)
+    link "隐私政策" (@e10) [interactive]
+```
+每行：`<role> "name" (@ref) [states] → text_preview`
+states 包含：`interactive`, `hidden`, `disabled`, `checked`, `selected`, `expanded`, `collapsed`
+
+**compact 模式（`-c`）：**
+```
+@e3 button "登录" [I]
+@e5 textbox "用户名" [I]
+@e6 textbox "密码" [I✓]
+@e8 link "忘记密码" [I]
+```
+每行：`@ref <role\|tag> "name" [flags]`
+flags：`I`=interactable, `h`=hidden, `D`=disabled, `✓`=checked, `S`=selected
+
+### Timeout 配置
+
+xb-v2 根据操作类型自动选择合适的超时时间：
+
+| 分类 | 默认超时 | 包含操作 |
+|------|----------|----------|
+| **navigation** | 30000ms | `open`, `back`, `forward`, `reload` |
+| **action** | 5000ms | `click`, `fill`, `type`, `press`, `hover`, `select`, `check`, `uncheck`, `focus`, `keydown`, `keyup`, `scroll`, `scrollintoview`, `drag`, `upload` |
+| **snapshot** | 15000ms | `snapshot`, `screenshot`, `pdf` |
+| **custom** | 5000ms (cap) | `wait`（`--timeout` 不超过 action 上限）|
+
+超时优先级：**CLI `--timeout` > 配置值 > 默认值**
+
+修改配置中的超时值：
+```bash
+xb config-v2 set timeout.action=5000
+xb config-v2 set timeout.navigation=30000
+```
+
+`wait` 特殊处理：`--timeout` 受 `timeouts.action` 上限约束，防止无限等待。如果不指定 `--timeout`，默认使用 `timeouts.action`。
 
 ### 验证 (Verify)
 
