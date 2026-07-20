@@ -51,6 +51,34 @@ metadata:
 NODE="${QCLAW_CLI_NODE_BINARY:-node}"
 ```
 
+## 能力分组 (Capabilities)
+
+xbrowser V2 将操作按功能域分为 6 组，通过 `--caps` 参数按需启用：
+
+| 能力组 | 说明 | 包含操作 |
+|--------|------|----------|
+| `core` | 基础页面交互（默认启用） | open, snapshot, click, fill, type, press, wait, get, close |
+| `network` | 网络拦截与 HAR 导出 | route, requests, har, unroute, request |
+| `pdf` | PDF 生成 | pdf |
+| `vision` | 视觉操作与截图 | screenshot, mouse, highlight |
+| `devtools` | 调试工具 | console, errors, trace, profiler, inspect |
+| `storage` | Cookie 与存储管理 | cookies, state, storage |
+
+- 默认只启用 `core`。需要 PDF 时加 `--caps core,pdf`，需要调试时加 `--caps core,devtools`。
+- 不启用的能力组对应的 agent-browser 参数不会注入，减少误操作风险。
+- 能力组的完整工具定义见 `scripts/lib/config-v2.js` 中的 `CAPABILITIES`。
+
+## Watchdog 进程守护
+
+xb-v2 自动注册信号处理守护（watchdog），确保异常退出时完成清理：
+
+- **触发信号**：SIGINT (Ctrl+C)、SIGTERM、SIGQUIT
+- **清理流程**：自动执行 `xb cleanup` 关闭 agent-browser 会话
+- **硬超时**：15 秒内清理未完成则强制退出（exit code 1）
+- **二次信号**：收到第二个终止信号时立即强制退出
+- **日志**：清理过程输出到 stderr，格式 `[xb-watchdog] ...`
+- 不需要手动配置，`xb-v2.mjs` 入口自动启用。
+
 ## xb 管理命令
 
 | 命令 | 说明 | 使用场景 |
@@ -74,6 +102,11 @@ NODE="${QCLAW_CLI_NODE_BINARY:-node}"
 | `xb guide shield-off` | 关闭防护引导 | agent 内部发起高风险确认流程；不要主动建议关闭 |
 | `xb version` | 查看版本信息 | 排查问题时确认版本 |
 | `xb help [command]` | 查看帮助 | 了解某个命令的用法 |
+| `xb install chrome` | 安装 Chrome for Testing | CfT 未安装时执行 |
+| `xb install deps` | 安装 Linux 系统依赖 | Linux 环境下缺少系统库时 |
+| `xb verify text <内容>` | 验证页面包含指定文本 | 断言页面内容 |
+| `xb verify url <url>` | 验证当前页面 URL | 断言导航结果 |
+| `xb verify title <标题>` | 验证页面标题 | 断言页面标题 |
 
 ### User-facing vs internal 边界
 
@@ -246,6 +279,25 @@ init 成功后执行浏览器命令：
   ```bash
   "$NODE" {baseDir}/scripts/xb.cjs run --browser chrome --headed -- open https://example.com
   ```
+- **运行模式 (`--mode`)**：xb-v2 支持两种运行模式，控制浏览器 profile 和会话生命周期：
+
+  | 模式 | 行为 | 使用场景 |
+  |------|------|----------|
+  | `persistent`（默认） | 复用已有 profile 和登录态 | 日常自动化、需要登录态的操作 |
+  | `isolated` | 使用临时 profile + `--cleanup-on-exit`，会话结束后自动清理 | 敏感操作、不可信页面、避免 Cookie 污染 |
+
+  用法：
+  ```bash
+  # 隔离模式：每次使用全新的临时 profile
+  "$NODE" {baseDir}/scripts/xb-v2.mjs --mode isolated run --browser cft open https://example.com
+
+  # 持久模式（默认）：复用 profile
+  "$NODE" {baseDir}/scripts/xb-v2.mjs --mode persistent run --browser chrome open https://example.com
+  ```
+
+  - `isolated` 模式自动在系统临时目录创建 profile，退出后不保留
+  - `isolated` 模式自动注入 `--cleanup-on-exit` 参数
+  - `--mode` 仅在 `run` 命令下生效，其他命令会忽略并输出警告
 
 ### 遇到登录页面
 
@@ -278,6 +330,45 @@ init 成功后执行浏览器命令：
 | `close` | 关闭标签页 |
 | `batch --bail "cmd1" "cmd2"` | 批量顺序执行（首个失败即停止） |
 | `stop <browser\|all>` | 关闭指定浏览器进程 |
+
+### 验证 (Verify)
+
+xb-v2 支持页面内容验证，用于自动化测试断言：
+
+```bash
+# 验证页面包含指定文本
+"$NODE" {baseDir}/scripts/xb-v2.mjs verify text "Welcome"
+
+# 验证当前页面 URL
+"$NODE" {baseDir}/scripts/xb-v2.mjs verify url "https://example.com/dashboard"
+
+# 验证页面标题包含指定内容
+"$NODE" {baseDir}/scripts/xb-v2.mjs verify title "Dashboard"
+```
+
+- `verify text <内容>` — 检查页面 body 文本中是否包含 `<内容>`
+- `verify url <url>` — 精确比较当前页面 URL（忽略末尾斜杠差异）
+- `verify title <标题>` — 检查页面 `<title>` 中是否包含 `<标题>`
+- 验证在页面操作后执行，利用 `get text` / `get url` / `get title` 获取实际值后比对
+- `ok=true` 表示断言通过，`ok=false` 返回 `error` 和 `hint`（含实际内容预览）
+- 实际执行由调用方（xb-v2.mjs 或 run pipeline）协调：先执行页面操作 → 再执行 verify
+
+### Install 命令
+
+xb-v2 提供独立的安装命令，用于安装浏览器和系统依赖：
+
+```bash
+# 安装 Chrome for Testing
+"$NODE" {baseDir}/scripts/xb-v2.mjs install chrome
+
+# 安装 Linux 系统依赖（libnss3, libgbm1 等）
+"$NODE" {baseDir}/scripts/xb-v2.mjs install deps
+```
+
+- `install chrome` — 通过 agent-browser 下载并安装 CfT，Linux 下自动附带 `--with-deps`
+- `install deps` — 仅 Linux 有效，安装 Chromium 运行时所需的系统库
+- 需要先 `xb setup` 安装 agent-browser CLI 后使用
+- 超时时间 5 分钟（chrome）/ 2 分钟（deps）
 
 ## 任务结束
 
