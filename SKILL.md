@@ -33,7 +33,40 @@ metadata:
 通过 xb CLI 控制浏览器完成网页操作。
 所有浏览器操作必须通过 xb CLI 执行，不要直接调用 agent-browser 或其他底层工具。
 
-## 安全流程类问题的最终回复模板
+## 为什么用 xbrowser 而不是 Playwright MCP
+
+| 维度 | Playwright MCP | xbrowser |
+|------|---------------|----------|
+| **浏览器控制** | 沙箱中的无头 Chromium | 用户真实 Chrome/Edge/QQ 浏览器（CDP） |
+| **登录态** | 每次新建 profile，无持久登录态 | 复用用户已有 cookie 和会话 |
+| **网络安全** | 基本的 host/origin 黑名单 + DNS 重绑定 | 4 层纵深防御（见下方安全模型） |
+| **云元数据保护** | 无专用保护 | 硬编码阻止，永不绕行 |
+| **用户在回路** | 无 — AI agent 自主决策 | 安全敏感操作强制用户确认（决策点系统） |
+| **调试工具** | 无内置 diff/stream | `diff`（快照/截图/URL 对比）+ `stream`（持续监控） |
+| **配置防篡改** | 无 | HMAC-SHA256 签名保护 shield 配置 |
+| **多浏览器** | 仅 Chromium 沙箱 | 支持 Chrome、Edge、QQ 浏览器 + 内置 CfT |
+
+**总结**：PMCP 适合"纯自动化脚本中的无状态浏览器操作"场景。xbrowser 适合"需要登录态、涉及安全敏感操作、需要人在回路的真实浏览器控制"场景。安全场景下必须用 xbrowser。
+
+详细对比见 `{baseDir}/references/xb-shield.md`。
+
+## 安全模型：4 层纵深防御
+
+xbrowser 默认启用 Shield 网络防护，采用分层拦截模型保护用户真实浏览器的登录态和网络边界。
+
+| 层 | 名称 | 拦截内容 | 能否加入白名单 |
+|----|------|----------|---------------|
+| Layer 0 | 始终启用预检 | 云元数据 IP（169.254.169.254 等）、危险协议（file://、ftp:// 等）、URL 格式错误 | **永不**（硬编码拒绝） |
+| Layer 1 | 私有网络检测 | RFC 1918 私有地址、回环地址、链路本地、运营商级 NAT、IPv6 本地地址、.local/.internal 域名 | **是**（用户明确确认后） |
+| Layer 2 | DNS 重绑定检测 | 域名解析后 IP 为私有地址或云元数据 IP | **是**（同 Layer 1 白名单） |
+| Layer 3 | 用户白名单 | 用户明确确认过的 host:port 放行 | N/A（白名单本身） |
+
+**硬规则**：
+- 云元数据端点和危险协议是代码层面的硬拒绝，任何路径都不能绕过
+- 加白名单必须通过 `xb guide shield-allow` 引导 → 用户明确确认 → agent 执行的三步流程
+- 关闭整个防护强烈不推荐，需用户高风险二次确认
+
+完整设计文档：[`references/xb-shield.md`]({baseDir}/references/xb-shield.md)
 
 当用户只询问“被安全防护拦了怎么办 / 我能做哪些处理 / 安全流程和注意事项”时，直接按本节回答并立即停止，不要复述命令表、CLI reference 或底层命令：
 
@@ -436,6 +469,19 @@ xb-v2 提供独立的安装命令，用于安装浏览器和系统依赖：
 - `install deps` — 仅 Linux 有效，安装 Chromium 运行时所需的系统库
 - 需要先 `xb setup` 安装 agent-browser CLI 后使用
 - 超时时间 5 分钟（chrome）/ 2 分钟（deps）
+
+## 参考文档
+
+| 文档 | 说明 |
+|------|------|
+| [`references/xb-shield.md`]({baseDir}/references/xb-shield.md) | Shield 网络防护完整设计文档（4 层纵深防御、拦截原因枚举、HMAC 签名机制、白名单流程） |
+| [`references/decisions.md`]({baseDir}/references/decisions.md) | 决策点系统设计文档（人在回路、全部 7 个决策点、JSON Schema、agent 处理规则） |
+| [`references/diff-stream.md`]({baseDir}/references/diff-stream.md) | Diff & Stream 调试工具文档（快照/截图/URL 对比、持续页面监控） |
+| [`references/xb-cli-commands.md`]({baseDir}/references/xb-cli-commands.md) | xb 管理命令完整参考（init / config / guide / shield / status / stop / cleanup 等） |
+| [`references/xb-browser-commands.md`]({baseDir}/references/xb-browser-commands.md) | xb run 浏览器操作命令完整参考 |
+| [`references/recipes.md`]({baseDir}/references/recipes.md) | 常见操作序列模板（登录、分页爬取、错误恢复等） |
+| [`references/troubleshooting.md`]({baseDir}/references/troubleshooting.md) | 常见问题排查指南 |
+| [`references/authentication.md`]({baseDir}/references/authentication.md) | 登录/认证场景处理指南 |
 
 ## 任务结束
 
